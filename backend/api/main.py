@@ -8,26 +8,41 @@ import uvicorn
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-INFLUX_URL = "http://localhost:8086"
-INFLUX_TOKEN = "iot-super-secret-token"
-INFLUX_ORG = "iot_org"
-INFLUX_BUCKET = "iot_metrics"
+INFLUX_URL    = os.getenv("INFLUX_URL",    "http://localhost:8086")
+INFLUX_TOKEN  = os.getenv("INFLUX_TOKEN",  "iot-super-secret-token")
+INFLUX_ORG    = os.getenv("INFLUX_ORG",    "iot_org")
+INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "iot_metrics")
+
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "https://real-time-anomaly-detection-in-io-t-networks-7k46jwdq3.vercel.app",
+    os.getenv("FRONTEND_URL", ""),
+]
 
 app = FastAPI(title="IoT Anomaly API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def query(flux):
-    with InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG) as c:
-        tables = c.query_api().query(flux, org=INFLUX_ORG)
-    return [r.values for t in tables for r in t.records]
+    try:
+        with InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG) as c:
+            tables = c.query_api().query(flux, org=INFLUX_ORG)
+        return [r.values for t in tables for r in t.records]
+    except Exception as e:
+        logger.error(f"InfluxDB query error: {e}")
+        return []
 
 @app.get("/health")
-def health(): return {"status": "ok"}
+def health(): return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 @app.get("/api/stats/summary")
 def summary():
     total = query(f'from(bucket:"{INFLUX_BUCKET}")|>range(start:-1h)|>filter(fn:(r)=>r._measurement=="iot_traffic")|>filter(fn:(r)=>r._field=="ensemble_score")|>group()|>count()')
-    anom = query(f'from(bucket:"{INFLUX_BUCKET}")|>range(start:-1h)|>filter(fn:(r)=>r._measurement=="iot_traffic" and r.is_anomaly=="True")|>filter(fn:(r)=>r._field=="ensemble_score")|>group()|>count()')
+    anom  = query(f'from(bucket:"{INFLUX_BUCKET}")|>range(start:-1h)|>filter(fn:(r)=>r._measurement=="iot_traffic" and r.is_anomaly=="True")|>filter(fn:(r)=>r._field=="ensemble_score")|>group()|>count()')
     t = total[0]["_value"] if total else 0
     a = anom[0]["_value"] if anom else 0
     return {"total_events": t, "anomalies_1h": a, "detection_rate": round(a/max(t,1)*100,2), "active_devices": 6}
