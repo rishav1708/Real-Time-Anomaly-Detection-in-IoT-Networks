@@ -1,0 +1,9 @@
+backend/venv/
+backend/ml/saved_models/
+__pycache__/
+*.pyc
+.env
+frontend/node_modules/
+frontend/build/
+datasets/*.csv
+.DS_Store
