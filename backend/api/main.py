@@ -8,24 +8,13 @@ import uvicorn
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-INFLUX_URL    = os.getenv("INFLUX_URL",    "http://localhost:8086")
+INFLUX_URL    = os.getenv("INFLUX_URL",    "https://us-east-1-1.aws.cloud2.influxdata.com")
 INFLUX_TOKEN  = os.getenv("INFLUX_TOKEN",  "iot-super-secret-token")
 INFLUX_ORG    = os.getenv("INFLUX_ORG",    "iot_org")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "iot_metrics")
 
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "https://real-time-anomaly-detection-in-io-t-networks-7k46jwdq3.vercel.app",
-    os.getenv("FRONTEND_URL", ""),
-]
-
 app = FastAPI(title="IoT Anomaly API", version="1.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def query(flux):
     try:
@@ -33,7 +22,7 @@ def query(flux):
             tables = c.query_api().query(flux, org=INFLUX_ORG)
         return [r.values for t in tables for r in t.records]
     except Exception as e:
-        logger.error(f"InfluxDB query error: {e}")
+        logger.error(f"Query error: {e}")
         return []
 
 @app.get("/health")
