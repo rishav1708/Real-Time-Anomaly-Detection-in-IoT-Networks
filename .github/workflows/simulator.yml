@@ -1,0 +1,30 @@
+name: IoT Simulator
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # every 5 minutes
+  workflow_dispatch:        # manual trigger button
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install influxdb-client paho-mqtt python-dotenv
+
+      - name: Run simulator for 4 minutes
+        env:
+          INFLUX_URL:    ${{ secrets.INFLUX_URL }}
+          INFLUX_TOKEN:  ${{ secrets.INFLUX_TOKEN }}
+          INFLUX_ORG:    ${{ secrets.INFLUX_ORG }}
+          INFLUX_BUCKET: ${{ secrets.INFLUX_BUCKET }}
+        run: |
+          cd backend
+          timeout 240 python data_ingestion/cloud_simulator.py || true
