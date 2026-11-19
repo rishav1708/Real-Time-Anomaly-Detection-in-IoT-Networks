@@ -8,6 +8,8 @@
 
 An AI-powered real-time security monitoring system that detects anomalies in IoT network traffic using an ensemble of machine learning models, visualized on a live React dashboard.
 
+**🔗 Live demo: https://real-time-anomaly-detection-in-iot-networks-209564509901.us-central1.run.app** (runs in demo mode with simulated device traffic)
+
 ## 🏗️ Architecture
 ## ⚡ Tech Stack
 
