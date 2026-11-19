@@ -2,8 +2,9 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AreaChart, Area, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 import axios from 'axios';
 
-const API = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-const WS  = process.env.REACT_APP_WS_URL  || 'ws://localhost:8000/ws/live';
+// Dev talks to the local API; the production build is served by the API itself (same origin).
+const API = process.env.REACT_APP_API_URL ?? (process.env.NODE_ENV === 'development' ? 'http://localhost:8000' : '');
+const WS  = process.env.REACT_APP_WS_URL  || (API || window.location.origin).replace(/^http/, 'ws') + '/ws/live';
 const C = { blue:'#00d4ff', green:'#00ff88', red:'#ff3860', orange:'#ff8c00', yellow:'#ffd700' };
 const PIE_COLORS = [C.green, C.yellow, C.orange, C.red];
 const SEV = {

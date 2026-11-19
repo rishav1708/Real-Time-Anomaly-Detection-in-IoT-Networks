@@ -5,6 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from influxdb_client import InfluxDBClient
 import uvicorn
 import pandas as pd
+from collections import deque, Counter
+from datetime import timedelta
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,6 +17,34 @@ INFLUX_URL    = os.getenv("INFLUX_URL",    "http://localhost:8086")
 INFLUX_TOKEN  = os.getenv("INFLUX_TOKEN",  "iot-super-secret-token")
 INFLUX_ORG    = os.getenv("INFLUX_ORG",    "iot_org")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "iot_metrics")
+
+# Demo mode: no InfluxDB configured -> simulate traffic in memory so the
+# dashboard works as a single free container (e.g. Cloud Run, HF Spaces).
+DEMO = not os.getenv("INFLUX_URL")
+TICK = 2  # seconds between simulated readings per device
+_events = deque(maxlen=6 * 3600 // TICK * 6)  # ~6h of history
+_last = None
+
+def _sync():
+    """Generate readings up to now. Lazy catch-up instead of a background task,
+    so it keeps working when the host pauses CPU between requests."""
+    global _last
+    from data_ingestion.cloud_simulator import DEVICES, generate_record
+    now = datetime.now(timezone.utc)
+    if _last is None or now - _last > timedelta(hours=6):
+        _last = now - timedelta(hours=6)
+    while _last + timedelta(seconds=TICK) <= now:
+        _last += timedelta(seconds=TICK)
+        for d in DEVICES:
+            _events.append({**generate_record(d), "time": _last})
+
+def _since(seconds, anomalies_only=False):
+    _sync()
+    cut = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    return [e for e in _events if e["time"] >= cut and (e["is_anomaly"] or not anomalies_only)]
+
+def _secs(span: str) -> int:
+    return int(span[:-1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[span[-1]]
 
 app = FastAPI(title="IoT Anomaly API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -108,6 +140,9 @@ async def analyze_csv(file: UploadFile = File(...)):
 
 @app.get("/api/stats/summary")
 def summary():
+    if DEMO:
+        ev = _since(3600); a = sum(e["is_anomaly"] for e in ev)
+        return {"total_events": len(ev), "anomalies_1h": a, "detection_rate": round(a/max(len(ev),1)*100,2), "active_devices": 6}
     total = query(f'from(bucket:"{INFLUX_BUCKET}")|>range(start:-1h)|>filter(fn:(r)=>r._measurement=="iot_traffic")|>filter(fn:(r)=>r._field=="ensemble_score")|>group()|>count()')
     anom  = query(f'from(bucket:"{INFLUX_BUCKET}")|>range(start:-1h)|>filter(fn:(r)=>r._measurement=="iot_traffic" and r.is_anomaly=="True")|>filter(fn:(r)=>r._field=="ensemble_score")|>group()|>count()')
     t = total[0]["_value"] if total else 0
@@ -116,6 +151,10 @@ def summary():
 
 @app.get("/api/anomalies/recent")
 def recent(limit: int = Query(50, le=200)):
+    if DEMO:
+        rows = sorted(_since(6*3600, True), key=lambda e: e["time"], reverse=True)[:limit]
+        return [{"timestamp": e["time"].isoformat(), "device_id": e["device_id"], "device_type": e["device_type"],
+                 "severity": e["severity"], "ensemble_score": e["ensemble_score"]} for e in rows]
     rows = query(f'from(bucket:"{INFLUX_BUCKET}")|>range(start:-6h)|>filter(fn:(r)=>r._measurement=="iot_traffic" and r.is_anomaly=="True")|>filter(fn:(r)=>r._field=="ensemble_score")|>sort(columns:["_time"],desc:true)|>limit(n:{limit})')
     return [{"timestamp": r["_time"].isoformat(), "device_id": r.get("device_id"),
              "device_type": r.get("device_type"), "severity": r.get("severity"),
@@ -123,11 +162,24 @@ def recent(limit: int = Query(50, le=200)):
 
 @app.get("/api/timeseries/traffic")
 def timeseries(range_: str = Query("1h", alias="range"), window: str = "5m"):
+    if DEMO:
+        w = _secs(window)
+        buckets = Counter(int(e["time"].timestamp()) // w * w + w for e in _since(_secs(range_)))
+        return [{"time": datetime.fromtimestamp(t, timezone.utc).isoformat(), "count": n} for t, n in sorted(buckets.items())]
     rows = query(f'from(bucket:"{INFLUX_BUCKET}")|>range(start:-{range_})|>filter(fn:(r)=>r._measurement=="iot_traffic")|>filter(fn:(r)=>r._field=="ensemble_score")|>aggregateWindow(every:{window},fn:count,createEmpty:false)')
     return [{"time": r["_time"].isoformat(), "count": r["_value"]} for r in rows]
 
 @app.get("/api/devices/health")
 def devices():
+    if DEMO:
+        by = {}
+        for e in _since(15*60): by.setdefault((e["device_id"], e["device_type"]), []).append(e["ensemble_score"])
+        out = []
+        for (d, t), v in by.items():
+            m = sum(v)/len(v)
+            out.append({"device_id": d, "device_type": t, "avg_score": round(m,4),
+                        "health": "critical" if m>0.75 else "degraded" if m>0.25 else "healthy"})
+        return out
     rows = query(f'from(bucket:"{INFLUX_BUCKET}")|>range(start:-15m)|>filter(fn:(r)=>r._measurement=="iot_traffic")|>filter(fn:(r)=>r._field=="ensemble_score")|>group(columns:["device_id","device_type"])|>mean()')
     return [{"device_id": r.get("device_id"), "device_type": r.get("device_type"),
              "avg_score": round(r.get("_value",0),4),
@@ -135,6 +187,9 @@ def devices():
 
 @app.get("/api/anomalies/by-severity")
 def by_severity():
+    if DEMO:
+        c = Counter(e["severity"] for e in _since(3600, True))
+        return {sev: c[sev] for sev in ["low","medium","high","critical"]}
     out = {}
     for sev in ["low","medium","high","critical"]:
         rows = query(f'from(bucket:"{INFLUX_BUCKET}")|>range(start:-1h)|>filter(fn:(r)=>r._measurement=="iot_traffic" and r.is_anomaly=="True" and r.severity=="{sev}")|>filter(fn:(r)=>r._field=="ensemble_score")|>group()|>count()')
@@ -146,6 +201,13 @@ async def ws_live(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
+            if DEMO:
+                ev = _since(30, True)
+                e = ev[-1] if ev else None
+                await websocket.send_text(json.dumps({"type":"live_update","timestamp":datetime.now(timezone.utc).isoformat(),
+                    "latest_anomaly":{"timestamp":e["time"].isoformat(),"device_id":e["device_id"],"severity":e["severity"],"score":e["ensemble_score"]} if e else None}))
+                await asyncio.sleep(2)
+                continue
             rows = query(f'from(bucket:"{INFLUX_BUCKET}")|>range(start:-30s)|>filter(fn:(r)=>r._measurement=="iot_traffic" and r.is_anomaly=="True")|>filter(fn:(r)=>r._field=="ensemble_score")|>sort(columns:["_time"],desc:true)|>limit(n:1)')
             payload = {"type":"live_update","timestamp":datetime.now(timezone.utc).isoformat(),
                        "latest_anomaly":{"timestamp":rows[0]["_time"].isoformat(),"device_id":rows[0].get("device_id"),"severity":rows[0].get("severity"),"score":rows[0].get("_value")} if rows else None}
@@ -153,6 +215,11 @@ async def ws_live(websocket: WebSocket):
             await asyncio.sleep(2)
     except WebSocketDisconnect:
         pass
+
+# Serve the built React dashboard from the same container (see root Dockerfile)
+_static = Path(__file__).resolve().parent.parent / "static"
+if _static.is_dir():
+    app.mount("/", StaticFiles(directory=_static, html=True), name="static")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
